@@ -3,7 +3,7 @@
 ;; Copyright (C) 2019  Adam Porter
 
 ;; Author: Adam Porter <adam@alphapapa.net>
-;; Keywords:
+;; Keywords: ibuffer, buffers, convenience
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -20,7 +20,7 @@
 
 ;;; Commentary:
 
-;;
+;; Based on code posted at <https://www.reddit.com/r/emacs/comments/6qfvia/can_we_talk_about_managingswitching_between_many/dkz5v3n/>.
 
 ;;; Code:
 
@@ -44,10 +44,12 @@
 
 (defcustom ibuffer-auto-groups-directories
   '(("~/src/emacs" . 1)
-    ("~/src" . 1)
+    ;; ("~/src" . 1)
     ("~/.homesick/repos/main/" . 2))
   "Directories to automatically generate groups for."
   :type '(repeat (cons directory depth)))
+
+;; TODO: Var for modes to group automatically.
 
 (defcustom ibuffer-auto-groups-default-groups
   '(;; ("~/.homesick/repos/main"
@@ -74,10 +76,10 @@
      (derived-mode . magit-mode))
     ("Helm"
      (derived-mode . helm-major-mode))
-    ("*special*"
-     (starred-name))
     ("~/org"
-     (directory . "/home/me/org/")))
+     (directory . "/home/me/org/"))
+    ("*special*"
+     (starred-name)))
   "Default groups added to \"Auto-groups\" groups, in format expected by `ibuffer-saved-filter-groups'."
   :type '(alist :key-type string
                 ;; MAYBE: Add detail to cons.
@@ -96,36 +98,56 @@
 
 (defun ibuffer-auto-groups-set-groups (&rest _ignore)
   "Set \"Auto-groups\" saved groups in `ibuffer-saved-filter-groups'."
-  (let ((directory-groups (->> (--map (ibuffer-auto-groups-directory (car it) (cdr it))
-                                      ibuffer-auto-groups-directories)
-                               (-flatten-n 1))))
-    (setf ibuffer-saved-filter-groups
-          (a-assoc ibuffer-saved-filter-groups
-                   "Auto-groups" (append directory-groups
-                                         ibuffer-auto-groups-default-groups
-                                         (ibuffer-auto-groups-buffer-groups))))))
+  (let* ((auto-directory-groups (->> (--map (ibuffer-auto-groups-directory (car it) (cdr it))
+                                            ibuffer-auto-groups-directories)
+                                     (-flatten-n 1)))
+         (auto-groups (append auto-directory-groups
+                              ibuffer-auto-groups-default-groups
+                              (ibuffer-auto-groups-buffer-groups))))
+    (setf ibuffer-saved-filter-groups (a-assoc ibuffer-saved-filter-groups
+                                               "Auto-groups" auto-groups)
+          ibuffer-filter-groups auto-groups)))
 
 (cl-defun ibuffer-auto-groups-directory (directory &optional (depth 1))
   "Return groups for directories DEPTH levels beneath DIRECTORY."
   (let ((directories (list directory)))
     (dotimes (_ depth)
       (setf directories (-flatten (-map #'f-directories directories))))
-    (append (list (cons directory
-                        (a-list 'directory (regexp-quote directory))))
-            (--map (cons (f-relative it default-directory)
-                         (a-list 'directory (regexp-quote it)))
-                   directories))))
+    (--map (cons (f-relative it default-directory)
+                 (a-list 'auto-groups-directory (regexp-quote it)))
+           directories)))
 
 (defun ibuffer-auto-groups-buffer-groups ()
-  "Return groups for directories for all file-backed buffers."
+  "Return groups for directories for all buffers."
   (->> (buffer-list)
-       (-select #'buffer-file-name)
-       (--map (f-dirname (buffer-file-name it)))
+       (--map (let ((dir (or (buffer-file-name it)
+                             (buffer-local-value 'default-directory it))))
+                (if (f-directory? dir)
+                    (directory-file-name dir)
+                  (f-dirname dir))))
        (-uniq)
+       (-non-nil)
        (--map (cons (f-relative it (or ibuffer-default-directory
                                        default-directory))
-                    (a-list 'directory (regexp-quote it))))
+                    ;; MAYBE: Should we use `auto-groups-directory' here?
+                    (a-list 'directory (rx-to-string `(seq ,it (or "/" eos))))))
        (-sort (-on #'string< #'car))))
+
+;;;; ibuffer filter
+
+(define-ibuffer-filter auto-groups-directory
+    "Limit current view to buffers with directory matching QUALIFIER.
+
+For a buffer associated with file '/a/b/c.d', this matches
+against '/a/b'. For a buffer not associated with a file, this
+matches against the value of `default-directory' in that buffer."
+  (:description "ibuffer-auto-groups-directory name"
+                :reader (read-from-minibuffer "Auto-Filter by directory name (regex): "))
+  (when-let* ((dir (or (buffer-file-name buf)
+                       ;; TODO: I guess we need a list of variables like `magit--default-directory' to check.
+                       ;; Either that, or a white/blacklist of modes to check `default-directory' in.
+                       (buffer-local-value 'magit--default-directory buf))))
+    (string-match qualifier dir)))
 
 ;;;; Footer
 
